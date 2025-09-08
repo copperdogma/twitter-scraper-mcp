@@ -65,9 +65,9 @@ async def test_execute_tool_uses_env_credentials(monkeypatch):
         async def user_id(self):
             return "123"
 
-        async def user(self, uid):
+        async def user(self):
             class U:  # minimal shape for _test_authentication if called
-                id = uid
+                id = "123"
                 screen_name = "tester"
                 name = "Tester"
                 followers_count = 0
