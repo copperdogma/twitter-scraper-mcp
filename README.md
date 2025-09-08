@@ -42,6 +42,43 @@ pip install -r requirements.txt
 python server.py
 ```
 
+### Quick Install (macOS LaunchAgent)
+
+One-liner to install and run as a per-user LaunchAgent on port 7781:
+
+```bash
+bash -lc 'PORT=7781 LABEL=com.mcp.twitter APP_DIR="$HOME/MCPs/twitter-scraper-mcp" VENV_DIR="$APP_DIR/.venv" PY_BIN="$VENV_DIR/bin/python" PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist" LOG_OUT="$HOME/Library/Logs/${LABEL}.out.log" LOG_ERR="$HOME/Library/Logs/${LABEL}.err.log"; mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"; cd "$APP_DIR"; [ -x "$PY_BIN" ] || python3 -m venv "$VENV_DIR"; "$PY_BIN" -m pip install -U pip >/dev/null; "$PY_BIN" -m pip install -U -r "$APP_DIR/requirements.txt" >/dev/null; cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${LABEL}</string>
+  <key>ProgramArguments</key><array>
+    <string>${PY_BIN}</string>
+    <string>${APP_DIR}/server.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>${APP_DIR}</string>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>${VENV_DIR}/bin:/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    <key>TRANSPORT</key><string>sse</string>
+    <key>HOST</key><string>127.0.0.1</string>
+    <key>PORT</key><string>${PORT}</string>
+    <key>SSE_ENDPOINT</key><string>/sse</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>${LOG_OUT}</string>
+  <key>StandardErrorPath</key><string>${LOG_ERR}</string>
+</dict></plist>
+PLIST
+/usr/bin/plutil -lint "$PLIST"; launchctl bootout gui/"$(id -u)" "$PLIST" 2>/dev/null || true; launchctl bootstrap gui/"$(id -u)" "$PLIST"; launchctl kickstart -kp gui/"$(id -u)"/"${LABEL}"; launchctl print gui/"$(id -u)"/"${LABEL}" | sed -n '1,40p''
+```
+
+Quick foreground run (for testing only):
+
+```bash
+cd ~/MCPs/twitter-scraper-mcp && python3 -m venv .venv && .venv/bin/python -m pip install -U -r requirements.txt && TRANSPORT=sse HOST=127.0.0.1 PORT=7781 SSE_ENDPOINT=/sse .venv/bin/python server.py
+```
+
 ## Authentication
 
 This server authenticates using environment variables only. Set them in `twitter-scraper-mcp/.env`:

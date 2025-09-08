@@ -130,6 +130,18 @@ class TwitterMCPServer:
                 return [types.TextContent(type="text", text=(
                     "Authentication is automatic using .env. The authenticate tool is deprecated."
                 ))]
+            # Explicitly disable write/DM tools for safety
+            disabled = {
+                "tweet",
+                "like_tweet",
+                "retweet",
+                "send_dm",
+                "add_reaction_to_message",
+                "delete_dm",
+                "get_dm_history",  # reading DMs is sensitive; disable by default
+            }
+            if name in disabled:
+                return [types.TextContent(type="text", text=f"Tool '{name}' is disabled on this server for safety.")]
             ct0 = os.getenv("TWITTER_CT0")
             auth_token = os.getenv("TWITTER_AUTH_TOKEN")
             if not ct0 or not auth_token:
@@ -143,10 +155,6 @@ class TwitterMCPServer:
                 ]
 
             client = await self._ensure_client(ct0, auth_token)
-
-            if name == "tweet":
-                result = await self._post_tweet(client, arguments["text"])
-                return [types.TextContent(type="text", text=f"Tweet posted successfully: {json.dumps(result, indent=2)}")]
 
             if name == "get_user_info":
                 result = await self._get_user_info(client, arguments["username"])
@@ -170,30 +178,7 @@ class TwitterMCPServer:
                 result = await self._get_latest_timeline(client, count)
                 return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
-            if name == "like_tweet":
-                result = await self._like_tweet(client, arguments["tweet_id"])
-                return [types.TextContent(type="text", text=f"Tweet liked successfully: {json.dumps(result, indent=2)}")]
-
-            if name == "retweet":
-                result = await self._retweet(client, arguments["tweet_id"])
-                return [types.TextContent(type="text", text=f"Tweet retweeted successfully: {json.dumps(result, indent=2)}")]
-
-            if name == "send_dm":
-                result = await self._send_dm(client, arguments["recipient_username"], arguments["text"])
-                return [types.TextContent(type="text", text=f"DM sent successfully: {json.dumps(result, indent=2)}")]
-
-            if name == "get_dm_history":
-                count = arguments.get("count", 20)
-                result = await self._get_dm_history(client, arguments["recipient_username"], count)
-                return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
-
-            if name == "add_reaction_to_message":
-                result = await self._add_reaction_to_message(client, arguments["message_id"], arguments["emoji"], arguments["conversation_id"])
-                return [types.TextContent(type="text", text=f"Reaction added successfully: {json.dumps(result, indent=2)}")]
-
-            if name == "delete_dm":
-                result = await self._delete_dm(client, arguments["message_id"])
-                return [types.TextContent(type="text", text=f"DM deleted successfully: {json.dumps(result, indent=2)}")]
+            # write/DM tools are disabled; fall through to unknown if somehow reached
 
             if name == "get_tweet_replies":
                 count = arguments.get("count", 20)
@@ -214,17 +199,6 @@ class TwitterMCPServer:
         """Return Tool definitions without cookie parameters (implicit auth)."""
         return [
             Tool(
-                name="tweet",
-                description="Post a tweet",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "description": "The text content of the tweet", "maxLength": 280}
-                    },
-                    "required": ["text"]
-                }
-            ),
-            Tool(
                 name="get_user_info",
                 description="Get information about a Twitter user",
                 inputSchema={
@@ -233,19 +207,6 @@ class TwitterMCPServer:
                         "username": {"type": "string", "description": "The username (without @) to get info for"}
                     },
                     "required": ["username"]
-                }
-            ),
-            Tool(
-                name="search_tweets",
-                description="Search for tweets with a specific query",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string", "description": "The search query"},
-                        "count": {"type": "integer", "description": "Number of tweets to return (default: 20)", "default": 20, "minimum": 1, "maximum": 100},
-                        "product": {"type": "string", "description": "Type of results to return (e.g., 'Top' or 'Latest')", "enum": ["Top", "Latest"], "default": "Latest"}
-                    },
-                    "required": ["query"]
                 }
             ),
             Tool(
@@ -269,67 +230,16 @@ class TwitterMCPServer:
                 }
             ),
             Tool(
-                name="like_tweet",
-                description="Like a tweet by ID",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"tweet_id": {"type": "string", "description": "The ID of the tweet to like"}},
-                    "required": ["tweet_id"]
-                }
-            ),
-            Tool(
-                name="retweet",
-                description="Retweet a tweet by ID",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"tweet_id": {"type": "string", "description": "The ID of the tweet to retweet"}},
-                    "required": ["tweet_id"]
-                }
-            ),
-            Tool(
-                name="send_dm",
-                description="Send a direct message to a user",
+                name="search_tweets",
+                description="Search for tweets with a specific query",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "recipient_username": {"type": "string", "description": "The username (without @) of the recipient"},
-                        "text": {"type": "string", "description": "The message text to send"}
+                        "query": {"type": "string", "description": "The search query"},
+                        "count": {"type": "integer", "description": "Number of tweets to return (default: 20)", "default": 20, "minimum": 1, "maximum": 100},
+                        "product": {"type": "string", "description": "Type of results to return (e.g., 'Top' or 'Latest')", "enum": ["Top", "Latest"], "default": "Latest"}
                     },
-                    "required": ["recipient_username", "text"]
-                }
-            ),
-            Tool(
-                name="get_dm_history",
-                description="Get direct message history with a user",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "recipient_username": {"type": "string", "description": "The username (without @) to get DM history with"},
-                        "count": {"type": "integer", "description": "Number of messages to return (default: 20)", "default": 20, "minimum": 1, "maximum": 100}
-                    },
-                    "required": ["recipient_username"]
-                }
-            ),
-            Tool(
-                name="add_reaction_to_message",
-                description="Add a reaction (emoji) to a direct message",
-                inputSchema={
-                    "type": "object",
-                    "properties": {
-                        "message_id": {"type": "string", "description": "The ID of the message to react to"},
-                        "emoji": {"type": "string", "description": "The emoji to react with (e.g., '❤️', '👍', '😂')"},
-                        "conversation_id": {"type": "string", "description": "The conversation ID"}
-                    },
-                    "required": ["message_id", "emoji", "conversation_id"]
-                }
-            ),
-            Tool(
-                name="delete_dm",
-                description="Delete a direct message",
-                inputSchema={
-                    "type": "object",
-                    "properties": {"message_id": {"type": "string", "description": "The ID of the message to delete"}},
-                    "required": ["message_id"]
+                    "required": ["query"]
                 }
             ),
             Tool(
