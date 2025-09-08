@@ -266,8 +266,8 @@ class TwitterMCPServer:
             cookies = {'ct0': ct0, 'auth_token': auth_token}
             client.set_cookies(cookies)
             try:
-                user_id = await client.user_id()
-                _ = await client.user(user_id)
+                # Validate authentication by attempting to fetch the current user id
+                _ = await client.user_id()
             except Exception as e:
                 raise ValueError(f"Authentication failed with provided cookies: {str(e)}")
             self.client = client
@@ -278,43 +278,10 @@ class TwitterMCPServer:
         """Compatibility wrapper to ensure a client; uses env creds path."""
         return await self._ensure_client(ct0, auth_token)
 
-    async def _get_authenticated_client(self, ct0: str, auth_token: str) -> Client:
-        """Get or create an authenticated client for the given cookies"""
-        # Use ct0 as cache key since it's shorter and unique per session
-        cache_key = ct0
-        
-        # Check if we already have an authenticated client for these cookies
-        if cache_key in self.authenticated_clients:
-            return self.authenticated_clients[cache_key]
-        
-        # Create new client and authenticate
-        client = Client('en-US')
-        
-        # Set the cookies directly
-        cookies = {
-            'ct0': ct0,
-            'auth_token': auth_token
-        }
-        client.set_cookies(cookies)
-        
-        # Test authentication by getting user info
-        try:
-            # Use user_id() to test authentication instead of get_me()
-            user_id = await client.user_id()
-            if not user_id:
-                raise ValueError("Failed to get user ID")
-        except Exception as e:
-            raise ValueError(f"Authentication failed with provided cookies: {str(e)}")
-        
-        # Cache the authenticated client
-        self.authenticated_clients[cache_key] = client
-        return client
-
     async def _test_authentication(self, client: Client) -> Dict[str, Any]:
         """Test authentication and return user info"""
-        # Get user ID first, then use it to get user details
-        user_id = await client.user_id()
-        user = await client.user(user_id)
+        # Fetch current user info (no id argument)
+        user = await client.user()
         return {
             "authenticated": True,
             "user": {
