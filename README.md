@@ -1,5 +1,7 @@
 # Twitter MCP Server
 
+Important attribution: This repository is derived from the excellent work at https://github.com/takiAA/twitter-scraper-mcp by @takiAA. Please visit and support the original project. This repo applies a minimal, opinionated set of changes (detailed below) for a read‑only, hardened deployment.
+
 A Model Context Protocol (MCP) server that provides Twitter functionality using the `twikit` library. This server now uses implicit, environment-based authentication: credentials are read from a local `.env` file and applied automatically to every tool call.
 
 ## Features
@@ -10,6 +12,14 @@ A Model Context Protocol (MCP) server that provides Twitter functionality using 
 - **Trending Topics**: Get trending topics across different categories (trending, news, sports, entertainment, for-you).
 
 Security hardening: All write/DM capabilities (tweet, like, retweet, send_dm, reactions, delete_dm, DM history) are disabled and not exposed.
+
+## Changes From Upstream (takiAA/twitter-scraper-mcp)
+- Implicit auth via `.env` only; removed cookie parameters from tools.
+- Added a small pytest test suite validating implicit auth behavior.
+- Disabled and hid all write/DM tools; removed the `dm-history` resource.
+- Updated documentation and added a macOS LaunchAgent one‑liner.
+
+Note: If you need the full feature set (including write operations), use the upstream project: https://github.com/takiAA/twitter-scraper-mcp
 
 ## Disclaimer
 
