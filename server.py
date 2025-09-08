@@ -63,12 +63,6 @@ class TwitterMCPServer:
                     name="Search Tweets",
                     description="Search for tweets (requires ct0 and auth_token)",
                     mimeType="application/json"
-                ),
-                Resource(
-                    uri="twitter://dm-history",
-                    name="DM History",
-                    description="Get direct message history with a user (requires ct0 and auth_token)",
-                    mimeType="application/json"
                 )
             ]
 
@@ -103,11 +97,6 @@ class TwitterMCPServer:
                 query = getattr(uri, 'fragment', None) or "python"
                 tweets = await self._search_tweets(client, query, product="Latest")
                 return json.dumps(tweets, indent=2)
-            elif path == "dm-history":
-                # Extract username from fragment if provided
-                username = getattr(uri, 'fragment', None) or "twitter"
-                dm_history = await self._get_dm_history(client, username)
-                return json.dumps(dm_history, indent=2)
             else:
                 raise ValueError(f"Unknown resource path: {path}")
 

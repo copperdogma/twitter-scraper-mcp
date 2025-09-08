@@ -4,19 +4,12 @@ A Model Context Protocol (MCP) server that provides Twitter functionality using 
 
 ## Features
 
-- **Implicit Auth (via .env)**: Set `TWITTER_CT0` and `TWITTER_AUTH_TOKEN` in `.env` and all tools will authenticate automatically. Do not pass cookies in tool calls.
-- **Session Caching**: Automatically caches authenticated sessions for efficiency  
-- **Timeline Access**: Get tweets from your timeline
-- **User Information**: Retrieve user profiles and statistics
-- **Tweet Search**: Search for tweets with specific queries
-- **Tweet Management**: Post, like, and retweet tweets
-- **User Tweets**: Get tweets from specific users
-- **Direct Messaging**: Send DMs, get DM history, react to messages, and delete messages
-- **Authentication Testing**: Deprecated explicit tool; see below for current behavior
-- **Tweet Operations**: Post tweets, like/unlike tweets, retweet/delete retweets, bookmark tweets
-- **Tweet Retrieval**: Get tweets by ID, search tweets, get user timelines, get tweet replies
-- **User Operations**: Follow/unfollow users, get user information, search users
-- **Trending Topics**: Get trending topics across different categories (trending, news, sports, entertainment, for-you)
+- **Implicit Auth (via .env)**: Set `TWITTER_CT0` and `TWITTER_AUTH_TOKEN` in `.env`; all tools authenticate automatically. Do not pass cookies in tool calls.
+- **Read-Only Tools**: get_user_info, search_tweets, get_timeline, get_latest_timeline, get_tweet_replies, get_trends
+- **Session Caching**: Automatically caches authenticated sessions for efficiency.
+- **Trending Topics**: Get trending topics across different categories (trending, news, sports, entertainment, for-you).
+
+Security hardening: All write/DM capabilities (tweet, like, retweet, send_dm, reactions, delete_dm, DM history) are disabled and not exposed.
 
 ## Disclaimer
 
@@ -179,69 +172,7 @@ Retweet a tweet by ID:
 }
 ```
 
-#### 8. Send Direct Message
-Send a direct message to a user.
-
-**Parameters:**
-- `recipient_username` (string): The username (without @) to send the message to (automatically converted to user_id internally)
-- `text` (string): The message content
-
-```json
-{
-  "name": "send_dm",
-  "arguments": {
-    "recipient_username": "username",
-    "text": "Hello from MCP!"
-  }
-}
-```
-
-#### 9. Get DM History
-Get direct message history with a specific user.
-
-**Parameters:**
-- `recipient_username` (string): The username (without @) to get DM history with (automatically converted to user_id internally)
-- `count` (integer, optional): Number of messages to retrieve (default: 20, max: 100)
-
-```json
-{
-  "name": "get_dm_history", 
-  "arguments": {
-    "recipient_username": "username",
-    "count": 50
-  }
-}
-```
-
-#### 10. React to Direct Message
-Add an emoji reaction to a direct message.
-
-**Parameters:**
-- `message_id` (string): The ID of the message to react to
-- `emoji` (string): The emoji to add (e.g., "👍", "❤️", "😀")
-- `conversation_id` (string): The conversation ID containing the message
-
-```json
-{
-  "name": "add_reaction_to_message",
-  "arguments": {
-    "message_id": "message_id_here", 
-    "emoji": "👍",
-    "conversation_id": "conversation_id_here"
-  }
-}
-```
-
-#### 11. Delete Direct Message
-Delete a direct message:
-```json
-{
-  "tool": "delete_dm",
-  "arguments": {
-    "message_id": "1234567890123456789"
-  }
-}
-```
+<!-- Write/DM tools intentionally omitted for security. -->
 
 #### **get_tweet_replies**
 Get replies to a specific tweet.
