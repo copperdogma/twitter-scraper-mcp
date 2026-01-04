@@ -7,7 +7,8 @@ A Model Context Protocol (MCP) server that provides Twitter functionality using 
 ## Features
 
 - **Implicit Auth (via .env)**: Set `TWITTER_CT0` and `TWITTER_AUTH_TOKEN` in `.env`; all tools authenticate automatically. Do not pass cookies in tool calls.
-- **Read-Only Tools**: get_user_info, search_tweets, get_timeline, get_latest_timeline, get_tweet_replies, get_trends
+- **Read-Only Tools**: get_user_info, get_tweet_by_id, search_tweets, get_timeline, get_latest_timeline, get_tweet_replies, get_trends
+- **Flexible Input**: Tweet tools accept URLs (x.com, twitter.com) or plain IDs, with or without query strings
 - **Session Caching**: Automatically caches authenticated sessions for efficiency.
 - **Trending Topics**: Get trending topics across different categories (trending, news, sports, entertainment, for-you).
 
@@ -17,7 +18,16 @@ Security hardening: All write/DM capabilities (tweet, like, retweet, send_dm, re
 - Implicit auth via `.env` only; removed cookie parameters from tools.
 - Added a small pytest test suite validating implicit auth behavior.
 - Disabled and hid all write/DM tools; removed the `dm-history` resource.
+- Added `get_tweet_by_id` tool with flexible input parsing (URLs, plain IDs).
+- Enhanced `get_tweet_replies` to accept URLs in addition to plain IDs.
+- Applied monkey patches to fix twikit 2.3.3 `itemContent` KeyError bugs:
+  - Fixed `get_tweet_by_id` - handles cursor entries without `itemContent`
+  - Fixed `_get_more_replies` - handles cursor entries without `itemContent`
+- Added comprehensive test suite for `itemContent` error prevention
 - Updated documentation and added a macOS LaunchAgent one‑liner.
+
+### twikit itemContent Bug Fix
+This server includes runtime patches for twikit 2.3.3 bugs where certain Twitter API responses have cursor entries that lack the expected `itemContent` field. Without these patches, methods like `get_tweet_by_id` would crash with `KeyError: 'itemContent'` on certain tweets. The patches gracefully handle these malformed cursors while maintaining full functionality.
 
 Note: If you need the full feature set (including write operations), use the upstream project: https://github.com/takiAA/twitter-scraper-mcp
 
@@ -137,7 +147,38 @@ Get information about a Twitter user:
 }
 ```
 
-#### 4. Search Tweets
+#### 4. Get Tweet by ID
+Get a specific tweet by ID. **Both plain IDs and full URLs work identically.**
+
+With plain ID:
+```json
+{
+  "tool": "get_tweet_by_id",
+  "arguments": {
+    "tweet_input": "2006814700802363810"
+  }
+}
+```
+
+Or with full URL:
+```json
+{
+  "tool": "get_tweet_by_id",
+  "arguments": {
+    "tweet_input": "https://x.com/danifesto/status/2006814700802363810"
+  }
+}
+```
+
+**Supported formats** (all work the same):
+- ✅ Plain tweet ID: `"2006814700802363810"`
+- ✅ X.com URL: `"https://x.com/user/status/2006814700802363810"`
+- ✅ Twitter.com URL: `"https://twitter.com/user/status/2006814700802363810"`
+- ✅ URLs with query strings: `"https://x.com/user/status/2006814700802363810?s=46&t=..."`
+
+The tool automatically extracts the tweet ID from any of these formats.
+
+#### 5. Search Tweets
 Search for tweets:
 ```json
 {
@@ -185,10 +226,10 @@ Retweet a tweet by ID:
 <!-- Write/DM tools intentionally omitted for security. -->
 
 #### **get_tweet_replies**
-Get replies to a specific tweet.
+Get replies to a specific tweet (accepts URLs or plain IDs).
 
 **Parameters:**
-- `tweet_id` (string): The ID of the tweet to get replies for
+- `tweet_id` (string): Tweet ID or URL (e.g., "1234567890" or "https://x.com/user/status/1234567890")
 - `count` (integer, optional): Number of replies to retrieve (default: 20)
 
 ```json
@@ -196,6 +237,17 @@ Get replies to a specific tweet.
   "name": "get_tweet_replies",
   "arguments": {
     "tweet_id": "1234567890",
+    "count": 10
+  }
+}
+```
+
+Or with a URL:
+```json
+{
+  "name": "get_tweet_replies",
+  "arguments": {
+    "tweet_id": "https://x.com/danifesto/status/2006814700802363810",
     "count": 10
   }
 }

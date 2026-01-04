@@ -26,9 +26,145 @@ from mcp.types import (
 import mcp.types as types
 
 from twikit import Client
+from twikit.tweet import Tweet
+from twikit.utils import find_dict, Result
+from functools import partial
 
 # Load environment variables
 load_dotenv()
+
+# Monkey-patch twikit's get_tweet_by_id to handle missing itemContent
+_original_get_tweet_by_id = Client.get_tweet_by_id
+
+async def _patched_get_tweet_by_id(self, tweet_id: str, cursor: str | None = None) -> Tweet:
+    """Patched version that handles missing itemContent in cursor entries"""
+    from twikit.errors import TweetNotAvailable
+    from twikit.tweet import tweet_from_data
+
+    response, _ = await self.gql.tweet_detail(tweet_id, cursor)
+
+    if 'errors' in response:
+        raise TweetNotAvailable(response['errors'][0]['message'])
+
+    entries = find_dict(response, 'entries', find_one=True)[0]
+    reply_to = []
+    replies_list = []
+    related_tweets = []
+    tweet = None
+
+    for entry in entries:
+        if entry['entryId'].startswith('cursor'):
+            continue
+        tweet_object = tweet_from_data(self, entry)
+        if tweet_object is None:
+            continue
+
+        if entry['entryId'].startswith('tweetdetailrelatedtweets'):
+            related_tweets.append(tweet_object)
+            continue
+
+        if entry['entryId'] == f'tweet-{tweet_id}':
+            tweet = tweet_object
+        else:
+            if tweet is None:
+                reply_to.append(tweet_object)
+            else:
+                replies = []
+                sr_cursor = None
+                show_replies = None
+
+                for reply in entry['content']['items'][1:]:
+                    if 'tweetcomposer' in reply['entryId']:
+                        continue
+                    if 'tweet' in reply.get('entryId'):
+                        rpl = tweet_from_data(self, reply)
+                        if rpl is None:
+                            continue
+                        replies.append(rpl)
+                    if 'cursor' in reply.get('entryId'):
+                        sr_cursor = reply['item']['itemContent']['value']
+                        show_replies = partial(
+                            self._show_more_replies,
+                            tweet_id,
+                            sr_cursor
+                        )
+                tweet_object.replies = Result(
+                    replies,
+                    show_replies,
+                    sr_cursor
+                )
+                replies_list.append(tweet_object)
+
+                display_type = find_dict(entry, 'tweetDisplayType', True)
+                if display_type and display_type[0] == 'SelfThread':
+                    tweet.thread = [tweet_object, *replies]
+
+    # FIX: Safely handle cursor entry that may not have itemContent
+    if entries[-1]['entryId'].startswith('cursor'):
+        try:
+            reply_next_cursor = entries[-1]['content']['itemContent']['value']
+            _fetch_more_replies = partial(self._get_more_replies,
+                                          tweet_id, reply_next_cursor)
+        except (KeyError, TypeError):
+            # Cursor exists but doesn't have expected structure
+            reply_next_cursor = None
+            _fetch_more_replies = None
+    else:
+        reply_next_cursor = None
+        _fetch_more_replies = None
+
+    tweet.replies = Result(
+        replies_list,
+        _fetch_more_replies,
+        reply_next_cursor
+    )
+    tweet.reply_to = reply_to
+    tweet.related_tweets = related_tweets
+
+    return tweet
+
+# Apply the monkey patch
+Client.get_tweet_by_id = _patched_get_tweet_by_id
+
+# Monkey-patch _get_more_replies which has the same itemContent issue
+_original_get_more_replies = Client._get_more_replies
+
+async def _patched_get_more_replies(self, tweet_id: str, cursor: str) -> Result:
+    """Patched version that handles missing itemContent in cursor entries"""
+    from twikit.tweet import tweet_from_data
+
+    response, _ = await self.gql.tweet_detail(tweet_id, cursor)
+    entries = find_dict(response, 'entries', find_one=True)[0]
+
+    results = []
+    for entry in entries:
+        if entry['entryId'].startswith(('cursor', 'label')):
+            continue
+        tweet = tweet_from_data(self, entry)
+        if tweet is not None:
+            results.append(tweet)
+
+    # FIX: Safely handle cursor entry that may not have itemContent
+    if entries[-1]['entryId'].startswith('cursor'):
+        try:
+            next_cursor = entries[-1]['content']['itemContent']['value']
+            _fetch_next_result = partial(self._get_more_replies, tweet_id, next_cursor)
+        except (KeyError, TypeError):
+            # Cursor exists but doesn't have expected structure
+            next_cursor = None
+            _fetch_next_result = None
+    else:
+        next_cursor = None
+        _fetch_next_result = None
+
+    return Result(
+        results,
+        _fetch_next_result,
+        next_cursor
+    )
+
+# Apply the monkey patch
+Client._get_more_replies = _patched_get_more_replies
 
 class TwitterMCPServer:
     def __init__(self):
@@ -149,6 +285,10 @@ class TwitterMCPServer:
                 result = await self._get_user_info(client, arguments["username"])
                 return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
+            if name == "get_tweet_by_id":
+                result = await self._get_tweet_by_id(client, arguments["tweet_input"])
+                return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
             if name == "search_tweets":
                 count = arguments.get("count", 20)
                 product = arguments.get("product", "Latest")
@@ -171,7 +311,9 @@ class TwitterMCPServer:
 
             if name == "get_tweet_replies":
                 count = arguments.get("count", 20)
-                result = await self._get_tweet_replies(client, arguments["tweet_id"], count)
+                # Support both old 'tweet_id' and new 'tweet_input' parameter names for backwards compatibility
+                tweet_input = arguments.get("tweet_input") or arguments.get("tweet_id")
+                result = await self._get_tweet_replies(client, tweet_input, count)
                 return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
             if name == "get_trends":
@@ -196,6 +338,20 @@ class TwitterMCPServer:
                         "username": {"type": "string", "description": "The username (without @) to get info for"}
                     },
                     "required": ["username"]
+                }
+            ),
+            Tool(
+                name="get_tweet_by_id",
+                description="Get a specific tweet by ID. Accepts both plain tweet IDs (e.g., '2006814700802363810') and full URLs (e.g., 'https://x.com/user/status/2006814700802363810'). Both formats work identically.",
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "tweet_input": {
+                            "type": "string",
+                            "description": "Tweet ID (plain digits) or full URL. Examples: '2006814700802363810' or 'https://x.com/user/status/2006814700802363810' - both work the same way"
+                        }
+                    },
+                    "required": ["tweet_input"]
                 }
             ),
             Tool(
@@ -233,14 +389,15 @@ class TwitterMCPServer:
             ),
             Tool(
                 name="get_tweet_replies",
-                description="Get replies to a specific tweet",
+                description="Get replies to a specific tweet. Accepts tweet IDs or URLs",
                 inputSchema={
                     "type": "object",
                     "properties": {
-                        "tweet_id": {"type": "string", "description": "The ID of the tweet to get replies for"},
+                        "tweet_id": {"type": "string", "description": "Tweet ID or URL (e.g., '2006814700802363810' or 'https://x.com/user/status/2006814700802363810')"},
+                        "tweet_input": {"type": "string", "description": "Tweet ID or URL (alternate parameter name)"},
                         "count": {"type": "integer", "description": "Number of replies to retrieve (default: 20)", "default": 20}
                     },
-                    "required": ["tweet_id"]
+                    "required": []
                 }
             ),
             Tool(
@@ -277,6 +434,37 @@ class TwitterMCPServer:
     async def _get_authenticated_client(self, ct0: str, auth_token: str) -> Client:
         """Compatibility wrapper to ensure a client; uses env creds path."""
         return await self._ensure_client(ct0, auth_token)
+
+    def _parse_tweet_id(self, tweet_input: str) -> str:
+        """Parse tweet ID from various input formats.
+
+        Supports:
+        - Plain ID: "2006814700802363810"
+        - Twitter URL: "https://twitter.com/user/status/2006814700802363810"
+        - X URL: "https://x.com/user/status/2006814700802363810"
+        - URLs with query strings: "https://x.com/user/status/2006814700802363810?s=46&t=..."
+        """
+        import re
+
+        # If it's already just digits, return as-is
+        if tweet_input.isdigit():
+            return tweet_input
+
+        # Try to extract tweet ID from URL patterns
+        # Matches: twitter.com/*/status/ID or x.com/*/status/ID
+        url_pattern = r'(?:twitter\.com|x\.com)/[^/]+/status/(\d+)'
+        match = re.search(url_pattern, tweet_input)
+        if match:
+            return match.group(1)
+
+        # If no pattern matched but it contains only digits and maybe some non-alphanumeric chars
+        # extract just the digits
+        digits_only = re.sub(r'\D', '', tweet_input)
+        if digits_only and len(digits_only) >= 15:  # Tweet IDs are typically 18-19 digits
+            return digits_only
+
+        # If nothing worked, return the original input and let the API handle the error
+        return tweet_input
 
     async def _test_authentication(self, client: Client) -> Dict[str, Any]:
         """Test authentication and return user info"""
@@ -319,6 +507,49 @@ class TwitterMCPServer:
             "verified": user.verified,
             "created_at": str(user.created_at)
         }
+
+    async def _get_tweet_by_id(self, client: Client, tweet_input: str) -> Dict[str, Any]:
+        """Get a specific tweet by ID (accepts URLs or plain IDs)"""
+        try:
+            # Parse the input to extract the tweet ID
+            tweet_id = self._parse_tweet_id(tweet_input)
+
+            # Log for debugging (will appear in error log)
+            import sys
+            print(f"[DEBUG] get_tweet_by_id: input='{tweet_input}' -> extracted_id='{tweet_id}'", file=sys.stderr)
+
+            # Fetch the tweet using the patched get_tweet_by_id
+            tweet = await client.get_tweet_by_id(tweet_id)
+
+            if not tweet:
+                return {
+                    "error": f"Tweet not found with ID: {tweet_id}",
+                    "original_input": tweet_input,
+                    "extracted_id": tweet_id,
+                    "note": "Tweet may be deleted, private, or the ID may be invalid"
+                }
+
+            return {
+                "id": tweet.id,
+                "text": tweet.text,
+                "author": tweet.user.screen_name,
+                "author_name": tweet.user.name,
+                "author_id": tweet.user.id,
+                "created_at": str(tweet.created_at),
+                "like_count": tweet.favorite_count,
+                "retweet_count": tweet.retweet_count,
+                "reply_count": tweet.reply_count,
+                "view_count": getattr(tweet, 'view_count', None),
+                "lang": getattr(tweet, 'lang', None),
+                "is_quote_status": getattr(tweet, 'is_quote_status', False),
+                "possibly_sensitive": getattr(tweet, 'possibly_sensitive', False)
+            }
+        except Exception as e:
+            return {
+                "error": f"Failed to retrieve tweet: {str(e)}",
+                "tweet_id": tweet_id,
+                "error_type": type(e).__name__
+            }
 
     async def _search_tweets(self, client: Client, query: str, count: int = 20, product: str = "Latest") -> List[Dict[str, Any]]:
         """Search for tweets"""
@@ -456,9 +687,12 @@ class TwitterMCPServer:
             "message_id": message_id
         }
 
-    async def _get_tweet_replies(self, client: Client, tweet_id: str, count: int = 20) -> List[Dict[str, Any]]:
-        """Get replies to a specific tweet"""
+    async def _get_tweet_replies(self, client: Client, tweet_input: str, count: int = 20) -> List[Dict[str, Any]]:
+        """Get replies to a specific tweet (accepts URLs or plain IDs)"""
         try:
+            # Parse the input to extract the tweet ID
+            tweet_id = self._parse_tweet_id(tweet_input)
+
             # Get the tweet by ID, which should include replies
             tweet = await client.get_tweet_by_id(tweet_id)
             
