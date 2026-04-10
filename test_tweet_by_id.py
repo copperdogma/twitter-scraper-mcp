@@ -87,6 +87,46 @@ async def test_parse_tweet_id_various_domains(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_extract_exact_tweet_lookup_id_plain_id(monkeypatch):
+    """search_tweets should recognize a plain tweet ID as a direct lookup."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # type: ignore
+
+    server = srv.TwitterMCPServer()
+    result = server._extract_exact_tweet_lookup_id("2006814700802363810")
+    assert result == "2006814700802363810"
+
+
+@pytest.mark.anyio
+async def test_extract_exact_tweet_lookup_id_url(monkeypatch):
+    """search_tweets should recognize a tweet URL as a direct lookup."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # type: ignore
+
+    server = srv.TwitterMCPServer()
+    result = server._extract_exact_tweet_lookup_id(
+        "https://x.com/danifesto/status/2006814700802363810?s=46"
+    )
+    assert result == "2006814700802363810"
+
+
+@pytest.mark.anyio
+async def test_extract_exact_tweet_lookup_id_ignores_free_text(monkeypatch):
+    """Free text that merely contains digits should not be treated as a tweet lookup."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # type: ignore
+
+    server = srv.TwitterMCPServer()
+    result = server._extract_exact_tweet_lookup_id(
+        "greg status 2006814700802363810 please"
+    )
+    assert result is None
+
+
+@pytest.mark.anyio
 async def test_get_tweet_by_id_tool_exists(monkeypatch):
     """Test that get_tweet_by_id tool is registered"""
     root = pathlib.Path(__file__).resolve().parent
@@ -221,6 +261,196 @@ async def test_get_tweet_by_id_executes_with_url(monkeypatch):
     assert data["id"] == "2006814700802363810"
     assert data["text"] == "Test tweet from URL"
     assert data["author"] == "urluser"
+
+
+@pytest.mark.anyio
+async def test_search_tweets_uses_tweet_lookup_for_url_query(monkeypatch):
+    """URL queries should bypass twikit search and reuse the working tweet detail path."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # type: ignore
+
+    class FakeClient:
+        search_called = False
+        looked_up_id = None
+
+        async def search_tweet(self, query, product="Latest", count=20):
+            self.search_called = True
+            raise AssertionError("search_tweet should not be called for direct tweet URLs")
+
+        async def get_tweet_by_id(self, tweet_id):
+            self.looked_up_id = tweet_id
+
+            class FakeTweet:
+                id = tweet_id
+                text = "Tweet fetched via direct lookup"
+                created_at = "2025-01-01"
+                favorite_count = 7
+                retweet_count = 2
+                reply_count = 1
+
+                class user:
+                    screen_name = "lookupuser"
+                    name = "Lookup User"
+
+            return FakeTweet()
+
+    server = srv.TwitterMCPServer()
+    client = FakeClient()
+    result = await server._search_tweets(
+        client,
+        "https://x.com/lookupuser/status/2006814700802363810?s=46",
+        count=5,
+        product="Latest",
+    )
+
+    assert client.looked_up_id == "2006814700802363810"
+    assert client.search_called is False
+    assert result == [
+        {
+            "id": "2006814700802363810",
+            "text": "Tweet fetched via direct lookup",
+            "author": "lookupuser",
+            "author_name": "Lookup User",
+            "created_at": "2025-01-01",
+            "like_count": 7,
+            "retweet_count": 2,
+            "reply_count": 1,
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_search_tweets_uses_tweet_lookup_for_plain_id_query(monkeypatch):
+    """Plain tweet IDs should also bypass the stale search endpoint."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # type: ignore
+
+    class FakeClient:
+        search_called = False
+        looked_up_id = None
+
+        async def search_tweet(self, query, product="Latest", count=20):
+            self.search_called = True
+            raise AssertionError("search_tweet should not be called for plain tweet IDs")
+
+        async def get_tweet_by_id(self, tweet_id):
+            self.looked_up_id = tweet_id
+
+            class FakeTweet:
+                id = tweet_id
+                text = "Tweet fetched via ID"
+                created_at = "2025-01-01"
+                favorite_count = 3
+                retweet_count = 1
+                reply_count = 0
+
+                class user:
+                    screen_name = "plainid"
+                    name = "Plain ID"
+
+            return FakeTweet()
+
+    server = srv.TwitterMCPServer()
+    client = FakeClient()
+    result = await server._search_tweets(client, "2006814700802363810", count=5, product="Latest")
+
+    assert client.looked_up_id == "2006814700802363810"
+    assert client.search_called is False
+    assert result == [
+        {
+            "id": "2006814700802363810",
+            "text": "Tweet fetched via ID",
+            "author": "plainid",
+            "author_name": "Plain ID",
+            "created_at": "2025-01-01",
+            "like_count": 3,
+            "retweet_count": 1,
+            "reply_count": 0,
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_search_tweets_parses_generic_search_results(monkeypatch):
+    """Generic text search should use the POST-based SearchTimeline response shape."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # type: ignore
+
+    async def fake_request_search_timeline(client, query, product, count, cursor=None):
+        assert query == "openai"
+        assert product == "Latest"
+        assert count == 3
+        return {
+            "data": {
+                "search_by_raw_query": {
+                    "search_timeline": {
+                        "timeline": {
+                            "instructions": [
+                                {
+                                    "entries": [
+                                        {
+                                            "entryId": "tweet-123",
+                                            "content": {
+                                                "itemContent": {
+                                                    "tweet_results": {
+                                                        "result": {
+                                                            "rest_id": "123",
+                                                            "legacy": {
+                                                                "id_str": "123",
+                                                                "full_text": "OpenAI generic search result",
+                                                                "created_at": "Fri Apr 10 12:00:00 +0000 2026",
+                                                                "favorite_count": 11,
+                                                                "retweet_count": 4,
+                                                                "reply_count": 2,
+                                                            },
+                                                            "core": {
+                                                                "user_results": {
+                                                                    "result": {
+                                                                        "core": {
+                                                                            "screen_name": "openai",
+                                                                            "name": "OpenAI",
+                                                                        }
+                                                                    }
+                                                                }
+                                                            },
+                                                        }
+                                                    }
+                                                }
+                                            },
+                                        },
+                                        {
+                                            "entryId": "cursor-bottom-1",
+                                            "content": {"value": "cursor"},
+                                        },
+                                    ]
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        }
+
+    monkeypatch.setattr(srv, "_request_search_timeline", fake_request_search_timeline)
+
+    server = srv.TwitterMCPServer()
+    result = await server._search_tweets(object(), "openai", count=3, product="Latest")
+
+    assert result == [
+        {
+            "id": "123",
+            "text": "OpenAI generic search result",
+            "author": "openai",
+            "author_name": "OpenAI",
+            "created_at": "Fri Apr 10 12:00:00 +0000 2026",
+            "like_count": 11,
+            "retweet_count": 4,
+            "reply_count": 2,
+        }
+    ]
 
 
 @pytest.mark.anyio

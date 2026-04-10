@@ -10,6 +10,9 @@ cookies provided by the LLM model or environment variables.
 import asyncio
 import os
 import json
+import sys
+import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from dotenv import load_dotenv
 
@@ -33,20 +36,195 @@ from functools import partial
 # Load environment variables
 load_dotenv()
 
+_SEARCH_BUNDLE_RE = re.compile(
+    r'https://abs\.twimg\.com/responsive-web/client-web/main\.[^"\']+\.js'
+)
+_SEARCH_TIMELINE_QUERY_ID_RE = re.compile(
+    r'queryId:"([A-Za-z0-9_-]+)",operationName:"SearchTimeline"'
+)
+_SEARCH_TIMELINE_QUERY_ID_CACHE: tuple[str, float] | None = None
+_SEARCH_TIMELINE_QUERY_ID_TTL_SECONDS = 900
+
 # Monkey-patch twikit's get_tweet_by_id to handle missing itemContent
 _original_get_tweet_by_id = Client.get_tweet_by_id
+
+
+async def _request_tweet_detail(client: Client, tweet_id: str, cursor: str | None = None) -> dict:
+    from twikit.client.gql import Endpoint
+    from twikit.constants import FEATURES
+    from twikit.utils import flatten_params
+
+    variables = {
+        'focalTweetId': tweet_id,
+        'with_rux_injections': False,
+        'includePromotedContent': True,
+        'withCommunity': True,
+        'withQuickPromoteEligibilityTweetFields': True,
+        'withBirdwatchNotes': True,
+        'withVoice': True,
+        'withV2Timeline': True
+    }
+    if cursor is not None:
+        variables['cursor'] = cursor
+
+    params = {
+        'variables': variables,
+        'features': FEATURES,
+        'fieldToggles': {'withAuxiliaryUserLabels': False}
+    }
+
+    response = await client.http.request(
+        'GET',
+        Endpoint.TWEET_DETAIL,
+        params=flatten_params(params),
+        headers=client._base_headers,
+    )
+
+    try:
+        payload = response.json()
+    except json.decoder.JSONDecodeError as e:
+        raise ValueError(
+            f"Tweet detail request returned invalid JSON (status {response.status_code})"
+        ) from e
+
+    if response.status_code >= 400:
+        if isinstance(payload, dict) and payload.get('errors'):
+            first_error = payload['errors'][0]
+            message = first_error.get('message') or json.dumps(first_error)
+        else:
+            message = response.text or f"HTTP {response.status_code}"
+        raise ValueError(f"Tweet detail request failed: {message}")
+
+    return payload
+
+
+async def _get_search_timeline_query_id(client: Client) -> str:
+    global _SEARCH_TIMELINE_QUERY_ID_CACHE
+
+    now = time.monotonic()
+    if _SEARCH_TIMELINE_QUERY_ID_CACHE is not None:
+        query_id, cached_at = _SEARCH_TIMELINE_QUERY_ID_CACHE
+        if now - cached_at < _SEARCH_TIMELINE_QUERY_ID_TTL_SECONDS:
+            return query_id
+
+    import httpx
+
+    headers = {
+        'User-Agent': client._user_agent,
+        'Accept-Language': f'{client.language},{client.language.split("-")[0]};q=0.9',
+    }
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as http:
+        search_page = await http.get(
+            'https://x.com/search?q=openai&src=typed_query&f=live',
+            headers=headers,
+        )
+        search_page.raise_for_status()
+
+        bundle_match = _SEARCH_BUNDLE_RE.search(search_page.text)
+        if bundle_match is None:
+            raise ValueError('Could not locate X search bundle URL')
+
+        bundle_response = await http.get(bundle_match.group(0), headers=headers)
+        bundle_response.raise_for_status()
+
+    query_id_match = _SEARCH_TIMELINE_QUERY_ID_RE.search(bundle_response.text)
+    if query_id_match is None:
+        raise ValueError('Could not locate SearchTimeline query id in X bundle')
+
+    query_id = query_id_match.group(1)
+    _SEARCH_TIMELINE_QUERY_ID_CACHE = (query_id, now)
+    return query_id
+
+
+async def _request_search_timeline(
+    client: Client,
+    query: str,
+    product: str,
+    count: int,
+    cursor: str | None = None,
+) -> dict:
+    from twikit.constants import FEATURES
+
+    query_id = await _get_search_timeline_query_id(client)
+    variables = {
+        'rawQuery': query,
+        'count': count,
+        'querySource': 'typed_query',
+        'product': product,
+    }
+    if cursor is not None:
+        variables['cursor'] = cursor
+
+    payload = {
+        'variables': variables,
+        'features': FEATURES,
+        'queryId': query_id,
+    }
+
+    response = await client.http.request(
+        'POST',
+        f'https://x.com/i/api/graphql/{query_id}/SearchTimeline',
+        json=payload,
+        headers=client._base_headers,
+    )
+
+    try:
+        response_payload = response.json()
+    except json.decoder.JSONDecodeError as e:
+        raise ValueError(
+            f"Search timeline request returned invalid JSON (status {response.status_code})"
+        ) from e
+
+    if response.status_code >= 400:
+        if isinstance(response_payload, dict) and response_payload.get('errors'):
+            first_error = response_payload['errors'][0]
+            message = first_error.get('message') or json.dumps(first_error)
+        else:
+            message = response.text or f"HTTP {response.status_code}"
+        raise ValueError(f"Search timeline request failed: {message}")
+
+    return response_payload
+
+
+def _is_retryable_twitter_error(error: Exception) -> bool:
+    message = str(error)
+    return any(marker in message for marker in (
+        'OverCapacity',
+        'HTTP 502',
+        'HTTP 503',
+        'status: 502',
+        'status: 503',
+    ))
+
+
+async def _retry_twitter_call(operation, attempts: int = 3, base_delay: float = 0.5):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await operation()
+        except Exception as error:
+            last_error = error
+            if attempt >= attempts or not _is_retryable_twitter_error(error):
+                raise
+            await asyncio.sleep(base_delay * attempt)
+    raise last_error
 
 async def _patched_get_tweet_by_id(self, tweet_id: str, cursor: str | None = None) -> Tweet:
     """Patched version that handles missing itemContent in cursor entries"""
     from twikit.errors import TweetNotAvailable
     from twikit.tweet import tweet_from_data
 
-    response, _ = await self.gql.tweet_detail(tweet_id, cursor)
+    response = await _request_tweet_detail(self, tweet_id, cursor)
 
     if 'errors' in response:
-        raise TweetNotAvailable(response['errors'][0]['message'])
+        first_error = response['errors'][0]
+        raise TweetNotAvailable(first_error.get('message') or json.dumps(first_error))
 
-    entries = find_dict(response, 'entries', find_one=True)[0]
+    entries_match = find_dict(response, 'entries', find_one=True)
+    if not entries_match:
+        raise TweetNotAvailable('Tweet detail response did not include timeline entries')
+    entries = entries_match[0]
     reply_to = []
     replies_list = []
     related_tweets = []
@@ -99,6 +277,9 @@ async def _patched_get_tweet_by_id(self, tweet_id: str, cursor: str | None = Non
                 if display_type and display_type[0] == 'SelfThread':
                     tweet.thread = [tweet_object, *replies]
 
+    if tweet is None:
+        raise TweetNotAvailable(f'Tweet not found for id {tweet_id}')
+
     # FIX: Safely handle cursor entry that may not have itemContent
     if entries[-1]['entryId'].startswith('cursor'):
         try:
@@ -133,8 +314,11 @@ async def _patched_get_more_replies(self, tweet_id: str, cursor: str) -> Result:
     """Patched version that handles missing itemContent in cursor entries"""
     from twikit.tweet import tweet_from_data
 
-    response, _ = await self.gql.tweet_detail(tweet_id, cursor)
-    entries = find_dict(response, 'entries', find_one=True)[0]
+    response = await _request_tweet_detail(self, tweet_id, cursor)
+    entries_match = find_dict(response, 'entries', find_one=True)
+    if not entries_match:
+        return Result([])
+    entries = entries_match[0]
 
     results = []
     for entry in entries:
@@ -165,6 +349,131 @@ async def _patched_get_more_replies(self, tweet_id: str, cursor: str) -> Result:
 
 # Apply the monkey patch
 Client._get_more_replies = _patched_get_more_replies
+
+# Monkey-patch twikit's request flow to tolerate X transaction header breakage.
+# twikit 2.3.3 can fail while deriving KEY_BYTE indices for X-Client-Transaction-Id,
+# which makes every authenticated request fail before cookies are even exercised.
+_original_client_request = Client.request
+
+async def _patched_client_request(self, method: str, url: str, auto_unlock: bool = True,
+                                  raise_exception: bool = True, **kwargs):
+    from urllib.parse import urlparse
+    from twikit.errors import (
+        AccountLocked,
+        AccountSuspended,
+        BadRequest,
+        Forbidden,
+        NotFound,
+        RequestTimeout,
+        ServerError,
+        TooManyRequests,
+        TwitterException,
+        Unauthorized,
+    )
+    from twikit.constants import DOMAIN
+
+    headers = kwargs.pop('headers', {})
+
+    if not getattr(self, '_disable_client_transaction', False):
+        transaction_error = None
+        if not self.client_transaction.home_page_response:
+            cookies_backup = self.get_cookies().copy()
+            ct_headers = {
+                'Accept-Language': f'{self.language},{self.language.split("-")[0]};q=0.9',
+                'Cache-Control': 'no-cache',
+                'Referer': f'https://{DOMAIN}',
+                'User-Agent': self._user_agent,
+            }
+            try:
+                await self.client_transaction.init(self.http, ct_headers)
+            except Exception as e:
+                transaction_error = e
+                self._disable_client_transaction = True
+            finally:
+                self.set_cookies(cookies_backup, clear_cookies=True)
+
+        if transaction_error is None:
+            try:
+                tid = self.client_transaction.generate_transaction_id(
+                    method=method,
+                    path=urlparse(url).path,
+                )
+                headers['X-Client-Transaction-Id'] = tid
+            except Exception as e:
+                transaction_error = e
+                self._disable_client_transaction = True
+
+        if transaction_error is not None and not getattr(self, '_transaction_bypass_warned', False):
+            print(
+                f"[WARN] twikit transaction header disabled after bootstrap failure: {transaction_error}",
+                file=sys.stderr,
+            )
+            self._transaction_bypass_warned = True
+
+    cookies_backup = self.get_cookies().copy()
+    response = await self.http.request(method, url, headers=headers, **kwargs)
+    self._remove_duplicate_ct0_cookie()
+
+    try:
+        response_data = response.json()
+    except json.decoder.JSONDecodeError:
+        response_data = response.text
+
+    if isinstance(response_data, dict) and 'errors' in response_data:
+        first_error = response_data['errors'][0]
+        error_code = first_error.get('code')
+        error_message = first_error.get('message') or json.dumps(first_error)
+        if error_code in (37, 64):
+            raise AccountSuspended(error_message)
+
+        if error_code == 326:
+            if self.captcha_solver is None:
+                raise AccountLocked(
+                    'Your account is locked. Visit '
+                    f'https://{DOMAIN}/account/access to unlock it.'
+                )
+            if auto_unlock:
+                await self.unlock()
+                self.set_cookies(cookies_backup, clear_cookies=True)
+                response = await self.http.request(method, url, **kwargs)
+                self._remove_duplicate_ct0_cookie()
+                try:
+                    response_data = response.json()
+                except json.decoder.JSONDecodeError:
+                    response_data = response.text
+        elif raise_exception and error_code is None:
+            raise TwitterException(error_message, headers=response.headers)
+
+    status_code = response.status_code
+
+    if status_code >= 400 and raise_exception:
+        message = f'status: {status_code}, message: "{response.text}"'
+        if status_code == 400:
+            raise BadRequest(message, headers=response.headers)
+        elif status_code == 401:
+            raise Unauthorized(message, headers=response.headers)
+        elif status_code == 403:
+            raise Forbidden(message, headers=response.headers)
+        elif status_code == 404:
+            raise NotFound(message, headers=response.headers)
+        elif status_code == 408:
+            raise RequestTimeout(message, headers=response.headers)
+        elif status_code == 429:
+            if await self._get_user_state() == 'suspended':
+                raise AccountSuspended(message, headers=response.headers)
+            raise TooManyRequests(message, headers=response.headers)
+        elif 500 <= status_code < 600:
+            raise ServerError(message, headers=response.headers)
+        else:
+            raise TwitterException(message, headers=response.headers)
+
+    if status_code == 200:
+        return response_data, response
+
+    return response_data, response
+
+# Apply the monkey patch
+Client.request = _patched_client_request
 
 class TwitterMCPServer:
     def __init__(self):
@@ -376,7 +685,7 @@ class TwitterMCPServer:
             ),
             Tool(
                 name="search_tweets",
-                description="Search for tweets with a specific query",
+                description="Search for tweets with a specific query. Full tweet URLs and plain tweet IDs are also supported and will resolve the exact tweet directly.",
                 inputSchema={
                     "type": "object",
                     "properties": {
@@ -414,7 +723,7 @@ class TwitterMCPServer:
         ]
 
     async def _ensure_client(self, ct0: str, auth_token: str) -> Client:
-        """Ensure a single authenticated client using env credentials; reuse if unchanged."""
+        """Ensure a single client using env credentials; reuse if unchanged."""
         async with self._client_lock:
             creds: Tuple[str, str] = (ct0, auth_token)
             if self.client is not None and self._last_credentials == creds:
@@ -422,11 +731,6 @@ class TwitterMCPServer:
             client = Client('en-US')
             cookies = {'ct0': ct0, 'auth_token': auth_token}
             client.set_cookies(cookies)
-            try:
-                # Validate authentication by attempting to fetch the current user id
-                _ = await client.user_id()
-            except Exception as e:
-                raise ValueError(f"Authentication failed with provided cookies: {str(e)}")
             self.client = client
             self._last_credentials = creds
             return client
@@ -444,8 +748,6 @@ class TwitterMCPServer:
         - X URL: "https://x.com/user/status/2006814700802363810"
         - URLs with query strings: "https://x.com/user/status/2006814700802363810?s=46&t=..."
         """
-        import re
-
         # If it's already just digits, return as-is
         if tweet_input.isdigit():
             return tweet_input
@@ -465,6 +767,46 @@ class TwitterMCPServer:
 
         # If nothing worked, return the original input and let the API handle the error
         return tweet_input
+
+    def _extract_exact_tweet_lookup_id(self, query: str) -> Optional[str]:
+        """Return a tweet ID when the query is exactly a tweet URL or tweet ID."""
+        normalized = query.strip()
+        if re.fullmatch(r"\d{15,25}", normalized):
+            return normalized
+
+        url_match = re.fullmatch(
+            r"(?:https?://)?(?:www\.)?(?:mobile\.)?(?:twitter\.com|x\.com)/[^/]+/status/(\d+)(?:[/?].*)?",
+            normalized,
+            re.IGNORECASE,
+        )
+        if url_match:
+            return url_match.group(1)
+
+        return None
+
+    def _search_entry_to_result(self, entry: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract a search result tweet from the current SearchTimeline response shape."""
+        try:
+            tweet_result = entry['content']['itemContent']['tweet_results']['result']
+            if 'tweet' in tweet_result:
+                tweet_result = tweet_result['tweet']
+
+            legacy = tweet_result['legacy']
+            user_result = tweet_result['core']['user_results']['result']
+            user_core = user_result['core']
+        except (KeyError, TypeError):
+            return None
+
+        return {
+            "id": tweet_result.get('rest_id') or legacy.get('id_str'),
+            "text": legacy.get('full_text'),
+            "author": user_core.get('screen_name'),
+            "author_name": user_core.get('name'),
+            "created_at": legacy.get('created_at'),
+            "like_count": legacy.get('favorite_count'),
+            "retweet_count": legacy.get('retweet_count'),
+            "reply_count": legacy.get('reply_count'),
+        }
 
     async def _test_authentication(self, client: Client) -> Dict[str, Any]:
         """Test authentication and return user info"""
@@ -519,7 +861,7 @@ class TwitterMCPServer:
             print(f"[DEBUG] get_tweet_by_id: input='{tweet_input}' -> extracted_id='{tweet_id}'", file=sys.stderr)
 
             # Fetch the tweet using the patched get_tweet_by_id
-            tweet = await client.get_tweet_by_id(tweet_id)
+            tweet = await _retry_twitter_call(lambda: client.get_tweet_by_id(tweet_id))
 
             if not tweet:
                 return {
@@ -553,20 +895,41 @@ class TwitterMCPServer:
 
     async def _search_tweets(self, client: Client, query: str, count: int = 20, product: str = "Latest") -> List[Dict[str, Any]]:
         """Search for tweets"""
-        tweets = await client.search_tweet(query, product=product, count=count)
-        return [
-            {
-                "id": tweet.id,
-                "text": tweet.text,
-                "author": tweet.user.screen_name,
-                "author_name": tweet.user.name,
-                "created_at": str(tweet.created_at),
-                "like_count": tweet.favorite_count,
-                "retweet_count": tweet.retweet_count,
-                "reply_count": tweet.reply_count
-            }
-            for tweet in tweets
-        ]
+        tweet_id = self._extract_exact_tweet_lookup_id(query)
+        if tweet_id is not None:
+            tweet = await _retry_twitter_call(lambda: client.get_tweet_by_id(tweet_id))
+            if tweet is None:
+                return []
+            return [
+                {
+                    "id": tweet.id,
+                    "text": tweet.text,
+                    "author": tweet.user.screen_name,
+                    "author_name": tweet.user.name,
+                    "created_at": str(tweet.created_at),
+                    "like_count": tweet.favorite_count,
+                    "retweet_count": tweet.retweet_count,
+                    "reply_count": tweet.reply_count,
+                }
+            ]
+
+        response = await _retry_twitter_call(
+            lambda: _request_search_timeline(client, query, product, count)
+        )
+        instructions = find_dict(response, 'instructions', find_one=True)
+        if not instructions:
+            return []
+
+        entries = find_dict(instructions[0], 'entries', find_one=True)
+        if not entries:
+            return []
+
+        results = []
+        for entry in entries[0]:
+            tweet_result = self._search_entry_to_result(entry)
+            if tweet_result is not None:
+                results.append(tweet_result)
+        return results
 
     async def _get_timeline(self, client: Client, count: int = 20) -> List[Dict[str, Any]]:
         """Get timeline tweets"""
@@ -694,7 +1057,7 @@ class TwitterMCPServer:
             tweet_id = self._parse_tweet_id(tweet_input)
 
             # Get the tweet by ID, which should include replies
-            tweet = await client.get_tweet_by_id(tweet_id)
+            tweet = await _retry_twitter_call(lambda: client.get_tweet_by_id(tweet_id))
             
             if not tweet:
                 return {"error": "Tweet not found"}
