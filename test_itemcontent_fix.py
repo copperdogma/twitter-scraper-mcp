@@ -32,6 +32,50 @@ async def test_monkey_patches_applied(monkeypatch):
     print("✅ Monkey patches verified")
 
 
+def test_user_init_tolerates_missing_legacy_fields(monkeypatch):
+    """X can omit empty legacy fields twikit still indexes directly."""
+    root = pathlib.Path(__file__).resolve().parent
+    sys.path.insert(0, str(root))
+    import server as srv  # noqa: F401
+    from twikit.user import User
+
+    user = User(None, {
+        "rest_id": "783214",
+        "is_blue_verified": False,
+        "legacy": {
+            "created_at": "Tue Feb 20 14:35:54 +0000 2007",
+            "name": "X",
+            "screen_name": "Twitter",
+            "profile_image_url_https": "https://example.com/avatar.jpg",
+            "location": "",
+            "description": "what's happening?!",
+            "entities": {"description": {}},
+            "verified": True,
+            "possibly_sensitive": False,
+            "can_dm": False,
+            "can_media_tag": True,
+            "want_retweets": False,
+            "default_profile": False,
+            "default_profile_image": False,
+            "has_custom_timelines": True,
+            "followers_count": 1,
+            "fast_followers_count": 0,
+            "normal_followers_count": 1,
+            "friends_count": 0,
+            "favourites_count": 0,
+            "listed_count": 0,
+            "media_count": 0,
+            "statuses_count": 1,
+            "is_translator": False,
+            "translator_type": "none",
+        },
+    })
+
+    assert user.description_urls == []
+    assert user.pinned_tweet_ids == []
+    assert user.withheld_in_countries == []
+
+
 @pytest.mark.anyio
 async def test_get_tweet_by_id_with_real_problematic_tweet(monkeypatch):
     """

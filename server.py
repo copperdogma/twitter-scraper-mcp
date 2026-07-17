@@ -30,6 +30,7 @@ import mcp.types as types
 
 from twikit import Client
 from twikit.tweet import Tweet
+from twikit.user import User
 from twikit.utils import find_dict, Result
 from functools import partial
 
@@ -47,6 +48,70 @@ _SEARCH_TIMELINE_QUERY_ID_TTL_SECONDS = 900
 
 # Monkey-patch twikit's get_tweet_by_id to handle missing itemContent
 _original_get_tweet_by_id = Client.get_tweet_by_id
+_original_user_init = User.__init__
+
+
+def _normalize_user_payload(data: dict) -> None:
+    """Normalize user payloads when X omits empty legacy fields twikit indexes."""
+    if not isinstance(data, dict):
+        return
+
+    data.setdefault('is_blue_verified', False)
+
+    legacy = data.get('legacy')
+    if not isinstance(legacy, dict):
+        return
+
+    legacy_defaults = {
+        'created_at': '',
+        'name': '',
+        'screen_name': '',
+        'profile_image_url_https': '',
+        'location': '',
+        'description': '',
+        'pinned_tweet_ids_str': [],
+        'verified': False,
+        'possibly_sensitive': False,
+        'can_dm': False,
+        'can_media_tag': False,
+        'want_retweets': False,
+        'default_profile': False,
+        'default_profile_image': False,
+        'has_custom_timelines': False,
+        'followers_count': 0,
+        'fast_followers_count': 0,
+        'normal_followers_count': 0,
+        'friends_count': 0,
+        'favourites_count': 0,
+        'listed_count': 0,
+        'media_count': 0,
+        'statuses_count': 0,
+        'is_translator': False,
+        'translator_type': 'none',
+        'withheld_in_countries': [],
+    }
+    for key, default in legacy_defaults.items():
+        legacy.setdefault(key, default)
+
+    entities = legacy.get('entities')
+    if not isinstance(entities, dict):
+        entities = {}
+        legacy['entities'] = entities
+
+    description = entities.get('description')
+    if not isinstance(description, dict):
+        description = {}
+        entities['description'] = description
+
+    description.setdefault('urls', [])
+
+
+def _patched_user_init(self, client: Client, data: dict) -> None:
+    _normalize_user_payload(data)
+    _original_user_init(self, client, data)
+
+
+User.__init__ = _patched_user_init
 
 
 async def _request_tweet_detail(client: Client, tweet_id: str, cursor: str | None = None) -> dict:
@@ -355,6 +420,27 @@ Client._get_more_replies = _patched_get_more_replies
 # which makes every authenticated request fail before cookies are even exercised.
 _original_client_request = Client.request
 
+def _dedupe_httpx_cookies(client: Client) -> None:
+    """Collapse duplicate cookie names before httpx/twikit name lookups.
+
+    httpx raises CookieConflict when code asks for a cookie by name and the jar
+    contains that name for multiple domains/paths. Twitter/Cloudflare can set
+    duplicate bot-management cookies such as __cf_bm, so keep the first value
+    for each name and rebuild the jar as simple name/value cookies.
+    """
+    cookies = {}
+    for cookie in client.http.cookies.jar:
+        cookies.setdefault(cookie.name, cookie.value)
+    client.http.cookies = list(cookies.items())
+
+def _patched_remove_duplicate_ct0_cookie(self) -> None:
+    # Twikit calls this method after requests. Keep the original intent, but
+    # generalize it beyond ct0 so Cloudflare cookies like __cf_bm cannot poison
+    # the jar between calls.
+    _dedupe_httpx_cookies(self)
+
+Client._remove_duplicate_ct0_cookie = _patched_remove_duplicate_ct0_cookie
+
 async def _patched_client_request(self, method: str, url: str, auto_unlock: bool = True,
                                   raise_exception: bool = True, **kwargs):
     from urllib.parse import urlparse
@@ -390,6 +476,7 @@ async def _patched_client_request(self, method: str, url: str, auto_unlock: bool
                 transaction_error = e
                 self._disable_client_transaction = True
             finally:
+                _dedupe_httpx_cookies(self)
                 self.set_cookies(cookies_backup, clear_cookies=True)
 
         if transaction_error is None:
@@ -410,6 +497,7 @@ async def _patched_client_request(self, method: str, url: str, auto_unlock: bool
             )
             self._transaction_bypass_warned = True
 
+    _dedupe_httpx_cookies(self)
     cookies_backup = self.get_cookies().copy()
     response = await self.http.request(method, url, headers=headers, **kwargs)
     self._remove_duplicate_ct0_cookie()
@@ -434,6 +522,7 @@ async def _patched_client_request(self, method: str, url: str, auto_unlock: bool
                 )
             if auto_unlock:
                 await self.unlock()
+                _dedupe_httpx_cookies(self)
                 self.set_cookies(cookies_backup, clear_cookies=True)
                 response = await self.http.request(method, url, **kwargs)
                 self._remove_duplicate_ct0_cookie()
