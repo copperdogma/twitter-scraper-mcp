@@ -47,12 +47,17 @@ cd twitter-mcp
 
 2. Install dependencies:
 ```bash
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 ```
 
-3. Run the server:
+3. Copy the example environment file and set local credentials:
 ```bash
-python server.py
+cp .env.example .env
+```
+
+4. Run the server:
+```bash
+python3 server.py
 ```
 
 ### Quick Install (macOS LaunchAgent)
@@ -103,6 +108,19 @@ TWITTER_CT0=your_ct0_cookie
 TWITTER_AUTH_TOKEN=your_auth_token_cookie
 ```
 
+Optional companion server:
+
+```
+XQUIK_API_KEY=your_xquik_api_key
+```
+
+Use `mcp_config.xquik.example.json` if you want this local read-only server and
+the remote [Xquik](https://xquik.com) MCP server available side by side. The
+full setup note is in [`docs/xquik-companion.md`](docs/xquik-companion.md).
+
+Xquik is an independent third-party service. Not affiliated with X Corp.
+"Twitter" and "X" are trademarks of X Corp.
+
 ### Getting Twitter Cookies
 
 To obtain your cookies:
@@ -125,8 +143,9 @@ Note: Do not pass `ct0` or `auth_token` in any tool arguments. Credentials are a
 
 Authentication tool deprecation: Calling `authenticate` returns a deprecation message since auth is implicit.
 
-#### 2. Tweet
-Post a new tweet:
+#### Disabled: Tweet
+This fork disables tweet publishing. The example below is kept only to show
+what is intentionally unavailable in the hardened read-only build.
 ```json
 {
   "tool": "tweet",
@@ -165,16 +184,16 @@ Or with full URL:
 {
   "tool": "get_tweet_by_id",
   "arguments": {
-    "tweet_input": "https://x.com/danifesto/status/2006814700802363810"
+    "tweet_input": "x.com/danifesto/status/2006814700802363810"
   }
 }
 ```
 
 **Supported formats** (all work the same):
 - ✅ Plain tweet ID: `"2006814700802363810"`
-- ✅ X.com URL: `"https://x.com/user/status/2006814700802363810"`
-- ✅ Twitter.com URL: `"https://twitter.com/user/status/2006814700802363810"`
-- ✅ URLs with query strings: `"https://x.com/user/status/2006814700802363810?s=46&t=..."`
+- ✅ X.com URL: `"x.com/user/status/2006814700802363810"`
+- ✅ Twitter.com URL: `"twitter.com/user/status/2006814700802363810"`
+- ✅ URLs with query strings: `"x.com/user/status/2006814700802363810?s=46&t=..."`
 
 The tool automatically extracts the tweet ID from any of these formats.
 
@@ -201,8 +220,9 @@ Get tweets from your timeline:
 }
 ```
 
-#### 6. Like Tweet
-Like a tweet by ID:
+#### Disabled: Like Tweet
+This fork disables like actions. The example below is kept only to show what is
+intentionally unavailable in the hardened read-only build.
 ```json
 {
   "tool": "like_tweet",
@@ -212,8 +232,9 @@ Like a tweet by ID:
 }
 ```
 
-#### 7. Retweet
-Retweet a tweet by ID:
+#### Disabled: Retweet
+This fork disables retweet actions. The example below is kept only to show what
+is intentionally unavailable in the hardened read-only build.
 ```json
 {
   "tool": "retweet",
@@ -229,7 +250,7 @@ Retweet a tweet by ID:
 Get replies to a specific tweet (accepts URLs or plain IDs).
 
 **Parameters:**
-- `tweet_id` (string): Tweet ID or URL (e.g., "1234567890" or "https://x.com/user/status/1234567890")
+- `tweet_id` (string): Tweet ID or URL (e.g., "1234567890" or "x.com/user/status/1234567890")
 - `count` (integer, optional): Number of replies to retrieve (default: 20)
 
 ```json
@@ -247,7 +268,7 @@ Or with a URL:
 {
   "name": "get_tweet_replies",
   "arguments": {
-    "tweet_id": "https://x.com/danifesto/status/2006814700802363810",
+    "tweet_id": "x.com/danifesto/status/2006814700802363810",
     "count": 10
   }
 }
