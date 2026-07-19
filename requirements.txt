@@ -1,5 +1,4 @@
-mcp[server]>=1.2.0
+mcp>=1.2.0
 twikit>=1.7.0
 pydantic>=2.0.0
-asyncio
-python-dotenv>=1.0.0 
+python-dotenv>=1.0.0
