@@ -172,26 +172,29 @@ async def _get_search_timeline_query_id(client: Client) -> str:
         if now - cached_at < _SEARCH_TIMELINE_QUERY_ID_TTL_SECONDS:
             return query_id
 
-    import httpx
-
     headers = {
         'User-Agent': client._user_agent,
         'Accept-Language': f'{client.language},{client.language.split("-")[0]};q=0.9',
     }
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0) as http:
-        search_page = await http.get(
-            'https://x.com/search?q=openai&src=typed_query&f=live',
-            headers=headers,
-        )
-        search_page.raise_for_status()
+    # X's logged-out search page redirects to onboarding and no longer serves
+    # the responsive-web bundle. Reuse the existing authenticated session.
+    search_page = await client.http.get(
+        'https://x.com/search?q=openai&src=typed_query&f=live',
+        headers=headers,
+        follow_redirects=True,
+        timeout=20.0,
+    )
+    search_page.raise_for_status()
 
-        bundle_match = _SEARCH_BUNDLE_RE.search(search_page.text)
-        if bundle_match is None:
-            raise ValueError('Could not locate X search bundle URL')
+    bundle_match = _SEARCH_BUNDLE_RE.search(search_page.text)
+    if bundle_match is None:
+        raise ValueError('Could not locate X search bundle in authenticated page; check session access')
 
-        bundle_response = await http.get(bundle_match.group(0), headers=headers)
-        bundle_response.raise_for_status()
+    bundle_response = await client.http.get(
+        bundle_match.group(0), headers=headers, timeout=20.0,
+    )
+    bundle_response.raise_for_status()
 
     query_id_match = _SEARCH_TIMELINE_QUERY_ID_RE.search(bundle_response.text)
     if query_id_match is None:
@@ -241,7 +244,7 @@ async def _request_search_timeline(
             f"Search timeline request returned invalid JSON (status {response.status_code})"
         ) from e
 
-    if response.status_code >= 400:
+    if response.status_code >= 400 or (isinstance(response_payload, dict) and response_payload.get("errors")):
         if isinstance(response_payload, dict) and response_payload.get('errors'):
             first_error = response_payload['errors'][0]
             message = first_error.get('message') or json.dumps(first_error)
@@ -640,8 +643,20 @@ class TwitterMCPServer:
             return self.get_tools()
 
         @self.server.call_tool()
-        async def handle_call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-            return await self.execute_tool(name, arguments)
+        async def handle_call_tool(name: str, arguments: dict) -> types.CallToolResult:
+            content = await self.execute_tool(name, arguments)
+            is_error = False
+            for item in content:
+                if item.text.startswith("Error:"):
+                    is_error = True
+                else:
+                    try:
+                        payload = json.loads(item.text)
+                    except (ValueError, TypeError):
+                        continue
+                    if isinstance(payload, dict) and payload.get("error"):
+                        is_error = True
+            return types.CallToolResult(content=content, isError=is_error)
 
     async def execute_tool(self, name: str, arguments: dict) -> list[types.TextContent]:
         """Execute a tool with implicit env-based auth (no cookie args)."""
@@ -1007,7 +1022,7 @@ class TwitterMCPServer:
         )
         instructions = find_dict(response, 'instructions', find_one=True)
         if not instructions:
-            return []
+            raise ValueError('Search timeline response is missing instructions')
 
         entries = find_dict(instructions[0], 'entries', find_one=True)
         if not entries:
