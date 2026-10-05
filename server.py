@@ -903,7 +903,11 @@ class TwitterMCPServer:
 
         return {
             "id": tweet_result.get('rest_id') or legacy.get('id_str'),
-            "text": legacy.get('full_text'),
+            "text": (
+                (tweet_result.get('note_tweet') or {})
+                .get('note_tweet_results', {}).get('result', {}).get('text')
+                or legacy.get('full_text')
+            ),
             "author": user_core.get('screen_name'),
             "author_name": user_core.get('name'),
             "created_at": legacy.get('created_at'),
@@ -934,7 +938,7 @@ class TwitterMCPServer:
         tweet = await client.create_tweet(text=text)
         return {
             "id": tweet.id,
-            "text": tweet.text,
+            "text": getattr(tweet, "full_text", tweet.text),
             "created_at": str(tweet.created_at),
             "author": tweet.user.screen_name
         }
@@ -977,7 +981,7 @@ class TwitterMCPServer:
 
             return {
                 "id": tweet.id,
-                "text": tweet.text,
+                "text": getattr(tweet, "full_text", tweet.text),
                 "author": tweet.user.screen_name,
                 "author_name": tweet.user.name,
                 "author_id": tweet.user.id,
@@ -1007,7 +1011,7 @@ class TwitterMCPServer:
             return [
                 {
                     "id": tweet.id,
-                    "text": tweet.text,
+                    "text": getattr(tweet, "full_text", tweet.text),
                     "author": tweet.user.screen_name,
                     "author_name": tweet.user.name,
                     "created_at": str(tweet.created_at),
@@ -1042,7 +1046,7 @@ class TwitterMCPServer:
         return [
             {
                 "id": tweet.id,
-                "text": tweet.text,
+                "text": getattr(tweet, "full_text", tweet.text),
                 "author": tweet.user.screen_name,
                 "author_name": tweet.user.name,
                 "created_at": str(tweet.created_at),
@@ -1060,7 +1064,7 @@ class TwitterMCPServer:
         return [
             {
                 "id": tweet.id,
-                "text": tweet.text,
+                "text": getattr(tweet, "full_text", tweet.text),
                 "author": tweet.user.screen_name,
                 "author_name": tweet.user.name,
                 "created_at": str(tweet.created_at),
@@ -1088,7 +1092,7 @@ class TwitterMCPServer:
         return [
             {
                 "id": tweet.id,
-                "text": tweet.text,
+                "text": getattr(tweet, "full_text", tweet.text),
                 "author": tweet.user.screen_name,
                 "author_name": tweet.user.name,
                 "created_at": str(tweet.created_at),
@@ -1178,7 +1182,7 @@ class TwitterMCPServer:
                     
                     replies_data.append({
                         "id": reply.id,
-                        "text": reply.text,
+                        "text": getattr(reply, "full_text", reply.text),
                         "author_id": reply.user.id,
                         "author_username": reply.user.screen_name,
                         "author_name": reply.user.name,
@@ -1193,7 +1197,7 @@ class TwitterMCPServer:
             return {
                 "original_tweet": {
                     "id": tweet.id,
-                    "text": tweet.text,
+                    "text": getattr(tweet, "full_text", tweet.text),
                     "author": tweet.user.screen_name,
                     "reply_count": tweet.reply_count
                 },

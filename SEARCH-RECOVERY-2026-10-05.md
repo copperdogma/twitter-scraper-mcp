@@ -63,3 +63,37 @@ structure. Local tests/push alone do not establish connector success.
   original tweet id and 3 replies, `isError: false`.
 - Parent cloud Bishop should repeat the independent calls above in its own
   conversation to verify access from that context.
+
+## Follow-up: complete long-post text
+
+- Parent independently verified the first deployed search/thread repair, then
+  identified that legacy previews were truncated mid-sentence.
+- Existing TweetDetail payloads already contain full `note_tweet` bodies:
+  2107164653147340988 is 482 characters versus 275 legacy characters;
+  2107164650249101695 is 639 versus 279. No additional endpoint or grant needed.
+- Read-only object serializers now use twikit's existing `Tweet.full_text`
+  property; raw search results prefer `note_tweet_results.result.text` and
+  fall back to `legacy.full_text` for ordinary posts.
+- Added regression coverage for notes, ordinary/empty-note fallbacks, exact
+  ID/URL lookup, detail, original thread text, and reply text. Suite: 44 passed.
+- Restarted only `com.mcp.twitter`. Fresh cloud search returned bodies of
+  482, 619, and 639 characters. Exact URL lookup and thread-original retrieval
+  for both targeted long posts matched search text byte-for-byte, returned
+  482/639 characters, and retrieved 3 replies each with `isError: false`.
+- This verifies the returned long-post bodies and bounded reply results; it
+  does not claim exhaustive pagination of every reply in an X conversation.
+
+## Branch and storage implications
+
+- Remote HEAD/default is still `master` at the original rollback baseline.
+  It was not changed. Repair branch `main` is tracked locally against
+  `origin/main`; launchd executes this checkout directly. There is no branch
+  switch in the LaunchAgent. A default clone still selects old `master`:
+  explicitly clone/checkout `main` to recover this repair.
+- Temporary helper/test/record/scan files were created only under `/tmp`;
+  six small files used 28 KiB allocated and were removed after use. Scanner
+  temporary snapshots were automatically removed. No dependency installation,
+  build cache, service configuration, or unrelated file cleanup was performed.
+- Existing Python bytecode was updated by initial tests/imports; subsequent
+  tests disabled bytecode creation and pytest caching. Low free disk space
+  predates the repair and remains an independent operational issue.
